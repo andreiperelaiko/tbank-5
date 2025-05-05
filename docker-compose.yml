@@ -1,0 +1,325 @@
+version: "3.8"
+
+# ============================================================================
+# Smart Warehouse — event-driven warehouse management
+#
+# Brings up:
+#   * 1× Zookeeper, 1× Kafka, 1× Schema Registry
+#   * 3× Cassandra (cluster, RF=3, NetworkTopologyStrategy)
+#   * 1× Cassandra initializer (applies init.cql)
+#   * 1× Consumer service (consumer-group: warehouse-state-consumer)
+#   * Prometheus + Grafana
+#
+# Producer is run on-demand:
+#   docker compose run --rm producer received --product SKU-001 --zone ZONE-A --quantity 100
+# ============================================================================
+
+networks:
+  warehouse:
+    driver: bridge
+
+volumes:
+  cassandra-1-data: {}
+  cassandra-2-data: {}
+  cassandra-3-data: {}
+  zookeeper-data: {}
+  zookeeper-log: {}
+  kafka-data: {}
+  prometheus-data: {}
+  grafana-data: {}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Kafka stack
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    networks: [warehouse]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc -w 2 localhost 2181 | grep -q Mode || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    networks: [warehouse]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    container_name: schema-registry
+    networks: [warehouse]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "PLAINTEXT://kafka:9092"
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # Topic + initial schema bootstrap (one-shot, Python-based)
+  kafka-init:
+    build: ./producer
+    container_name: kafka-init
+    networks: [warehouse]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    volumes:
+      - ./schemas:/schemas:ro
+      - ./scripts:/scripts:ro
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      SCHEMA_DIR: "/schemas"
+      TOPIC_MAIN: "warehouse-events"
+      TOPIC_DLQ: "warehouse-events-dlq"
+      TOPIC_PARTITIONS: "3"
+      TOPIC_REPLICATION: "1"
+      SUBJECT: "warehouse-events-value"
+      COMPATIBILITY: "BACKWARD"
+    entrypoint: ["python", "/scripts/init_kafka.py"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Cassandra cluster (3 nodes)
+  # ---------------------------------------------------------------------------
+  cassandra-1:
+    image: cassandra:4.1
+    container_name: cassandra-1
+    hostname: cassandra-1
+    networks: [warehouse]
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: "warehouse-cluster"
+      CASSANDRA_SEEDS: "cassandra-1"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack1"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+      MAX_HEAP_SIZE: "512M"
+      HEAP_NEWSIZE: "128M"
+    volumes:
+      - cassandra-1-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -E '^UN' >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  cassandra-2:
+    image: cassandra:4.1
+    container_name: cassandra-2
+    hostname: cassandra-2
+    networks: [warehouse]
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: "warehouse-cluster"
+      CASSANDRA_SEEDS: "cassandra-1"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack2"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+      MAX_HEAP_SIZE: "512M"
+      HEAP_NEWSIZE: "128M"
+    volumes:
+      - cassandra-2-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -E '^UN' >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  cassandra-3:
+    image: cassandra:4.1
+    container_name: cassandra-3
+    hostname: cassandra-3
+    networks: [warehouse]
+    depends_on:
+      cassandra-2:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CLUSTER_NAME: "warehouse-cluster"
+      CASSANDRA_SEEDS: "cassandra-1"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack3"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+      MAX_HEAP_SIZE: "512M"
+      HEAP_NEWSIZE: "128M"
+    volumes:
+      - cassandra-3-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -E '^UN' >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  cassandra-init:
+    image: cassandra:4.1
+    container_name: cassandra-init
+    networks: [warehouse]
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+      cassandra-2:
+        condition: service_healthy
+      cassandra-3:
+        condition: service_healthy
+    volumes:
+      - ./cassandra-init/init.cql:/init.cql:ro
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        echo "[cassandra-init] Waiting for the cluster to be ready..."
+        for i in $$(seq 1 60); do
+          if cqlsh cassandra-1 9042 -e "DESCRIBE CLUSTER" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+        echo "[cassandra-init] Applying init.cql..."
+        cqlsh cassandra-1 9042 -f /init.cql
+        echo "[cassandra-init] Schema applied."
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Application: consumer
+  # ---------------------------------------------------------------------------
+  consumer:
+    build: ./consumer
+    container_name: consumer
+    networks: [warehouse]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      cassandra-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC: "warehouse-events"
+      KAFKA_DLQ_TOPIC: "warehouse-events-dlq"
+      KAFKA_GROUP_ID: "warehouse-state-consumer"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CASSANDRA_CONTACT_POINTS: "cassandra-1,cassandra-2,cassandra-3"
+      CASSANDRA_PORT: "9042"
+      CASSANDRA_KEYSPACE: "warehouse"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_WRITE_CONSISTENCY: "QUORUM"
+      CASSANDRA_READ_CONSISTENCY: "QUORUM"
+      HTTP_PORT: "8000"
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Producer CLI (run on demand)
+  #   docker compose run --rm producer received --product SKU-001 --zone ZONE-A --quantity 100
+  # ---------------------------------------------------------------------------
+  producer:
+    build: ./producer
+    networks: [warehouse]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    profiles: ["cli"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC: "warehouse-events"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      SCHEMA_DIR: "/schemas"
+    volumes:
+      - ./schemas:/schemas:ro
+
+  # ---------------------------------------------------------------------------
+  # Monitoring
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    networks: [warehouse]
+    depends_on:
+      - consumer
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: grafana
+    networks: [warehouse]
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped

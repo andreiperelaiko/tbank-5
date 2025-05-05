@@ -1,0 +1,6 @@
+confluent-kafka[avro,schemaregistry]==2.6.1
+cassandra-driver==3.29.2
+prometheus-client==0.21.1
+Flask==3.0.3
+python-json-logger==2.0.7
+fastavro==1.9.7

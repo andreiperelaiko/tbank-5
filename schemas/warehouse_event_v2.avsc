@@ -1,0 +1,41 @@
+{
+  "type": "record",
+  "name": "WarehouseEvent",
+  "namespace": "warehouse",
+  "doc": "Warehouse domain event v2 — backward-compatible with v1 (adds optional supplier_id for PRODUCT_RECEIVED)",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_type", "type": {
+        "type": "enum",
+        "name": "WarehouseEventType",
+        "symbols": [
+          "PRODUCT_RECEIVED",
+          "PRODUCT_SHIPPED",
+          "PRODUCT_MOVED",
+          "PRODUCT_RESERVED",
+          "PRODUCT_RELEASED",
+          "INVENTORY_COUNTED",
+          "ORDER_CREATED",
+          "ORDER_COMPLETED"
+        ]
+    }},
+    {"name": "event_timestamp", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "product_id", "type": ["null", "string"], "default": null},
+    {"name": "zone_id", "type": ["null", "string"], "default": null},
+    {"name": "from_zone_id", "type": ["null", "string"], "default": null},
+    {"name": "to_zone_id", "type": ["null", "string"], "default": null},
+    {"name": "quantity", "type": ["null", "int"], "default": null},
+    {"name": "counted_quantity", "type": ["null", "int"], "default": null},
+    {"name": "order_id", "type": ["null", "string"], "default": null},
+    {"name": "items", "type": ["null", {"type": "array", "items": {
+        "type": "record",
+        "name": "OrderItem",
+        "fields": [
+          {"name": "product_id", "type": "string"},
+          {"name": "zone_id", "type": "string"},
+          {"name": "quantity", "type": "int"}
+        ]
+    }}], "default": null},
+    {"name": "supplier_id", "type": ["null", "string"], "default": null, "doc": "v2: identifier of the supplier from which the goods were received (only meaningful for PRODUCT_RECEIVED)"}
+  ]
+}

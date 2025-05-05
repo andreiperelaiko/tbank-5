@@ -1,0 +1,143 @@
+{
+  "title": "Smart Warehouse — Consumer",
+  "uid": "warehouse-consumer",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["warehouse", "kafka", "cassandra"],
+  "timezone": "browser",
+  "time": {"from": "now-15m", "to": "now"},
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Consumer lag by partition",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "consumer_lag",
+          "legendFormat": "{{topic}} / p{{partition}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (events/sec) by type",
+      "id": 2,
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (event_type) (rate(events_processed_total[1m]))",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "custom": {"lineWidth": 2, "fillOpacity": 10}}
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cassandra write errors (rate)",
+      "id": 3,
+      "gridPos": {"x": 0, "y": 8, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(cassandra_write_errors_total[1m])",
+          "legendFormat": "errors/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "DLQ rate by error code",
+      "id": 4,
+      "gridPos": {"x": 8, "y": 8, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (error_code) (rate(events_dlq_total[1m]))",
+          "legendFormat": "{{error_code}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Skipped events (duplicate / stale)",
+      "id": 5,
+      "gridPos": {"x": 16, "y": 8, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(events_skipped_total[1m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Event processing latency (p50/p95/p99)",
+      "id": 6,
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(event_processing_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(event_processing_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(event_processing_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "stat",
+      "title": "Connectivity",
+      "id": 7,
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "kafka_connected", "legendFormat": "Kafka", "refId": "A"},
+        {"expr": "cassandra_connected", "legendFormat": "Cassandra", "refId": "B"}
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+        }
+      }
+    }
+  ]
+}
